@@ -1,0 +1,72 @@
+name: Mend Security Scan
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+env:
+  MEND_AGENT_VERSION: "20.10.2"
+  NODE_VERSION: "20"
+  JAVA_VERSION: "11"
+  JAVA_DISTRIBUTION: "temurin"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Check for dependency file changes in latest push
+        if: github.event.action == 'synchronize'
+        id: filter
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} -- package.json package-lock.json)
+          if [ -n "$CHANGED" ]; then
+            echo "dependencies=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dependencies=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to run scan
+        id: decide
+        run: |
+          if [ "${{ github.event.action }}" == "opened" ]; then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.filter.outputs.dependencies }}" == "true" ]; then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_scan=false" >> "$GITHUB_OUTPUT"
+            echo "No changes to package.json or package-lock.json, skipping scan."
+          fi
+
+      - uses: actions/setup-node@v3
+        if: steps.decide.outputs.should_scan == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        if: steps.decide.outputs.should_scan == 'true'
+        run: npm ci
+
+      - uses: actions/setup-java@v3
+        if: steps.decide.outputs.should_scan == 'true'
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: Download Mend Agent
+        if: steps.decide.outputs.should_scan == 'true'
+        run: |
+          curl -fsSL https://unified-agent.s3.amazonaws.com/wss-unified-agent-${{ env.MEND_AGENT_VERSION }}.jar -o wss-unified-agent-${{ env.MEND_AGENT_VERSION }}.jar
+
+      - name: Run Mend Scan
+        if: steps.decide.outputs.should_scan == 'true'
+        env:
+          MEND_API_KEY: ${{ secrets.MEND_KEY }}
+        run: |
+          java -jar wss-unified-agent-${{ env.MEND_AGENT_VERSION }}.jar -apiKey "${MEND_API_KEY}" -c wss-unified-agent.config
